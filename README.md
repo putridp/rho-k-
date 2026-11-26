@@ -28,6 +28,23 @@ k players, vectors c of length J=8. The lexicographically smallest c picks next
 - Any full tie between two vectors (after round 0, where all start at zero) marks the
   k as `full tie ... (J too small)` and is never reported as settled.
 
+## Drift certificate (`certify.py`)
+Proves a loop permanent or predicts its exact break pick, from one loop of picks and
+the exact state at its start (dumped by `duel` with STATE_AT).
+- For the loop read from a round start x, F_p[m] = sum of C(y, m) over p's picks. By
+  Vandermonde, after r loops c_p[j] gains (-1)^j sum_i A_i(r) F_p[j-i], A_0(r) = r.
+  So for a pair (p, q), layers below the first unbalanced layer m (F_p[m] != F_q[m])
+  never change, and layer m drifts by exactly (-1)^m (F_p[m] - F_q[m]) per loop.
+- Each round's order is the sort at its start, so checking every adjacent pair of
+  every round covers every pick. A pair decided below m is permanent; decided at or
+  above m it is permanent if the drift favours the winner, else it flips once the
+  gap is used up. All pairs permanent proves the loop never breaks.
+- Checked against every false loop seen so far (k=15, 16, 24, 48: breaks after 13 to
+  618 repeats): the predicted break pick equals the engine's BREAK pick every time.
+
+    python3 certify.py 15 30591 8100     # false loop: breaks after about 25 repeats, pick 239670
+    python3 certify.py --settled         # every settled k -> certificates.csv
+
 ## Run
     gcc -O3 -march=native -o duel duel.c
     python3 validate.py

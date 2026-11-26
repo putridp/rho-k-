@@ -1,7 +1,14 @@
 /*
  * Greedy duel sequence Du(k,0), J = 8, exact 256-bit signed integers.
  *
- * Usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS]
+ * Usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS] [STATE_AT] [MIN_REPEATS]
+ *
+ * MIN_REPEATS (default 1000) raises the repeat floor of the settle rule; a large value
+ * keeps verifying a candidate up to CAP_PICKS (used to check certify.py predictions).
+ *
+ * STATE_AT (a multiple of K): write every player's c[0..7] at that pick to
+ * state_dump.txt (hex, two's complement), and make picks_dump.bin hold picks
+ * [STATE_AT, STATE_AT + DUMP_PICKS) instead of [0, DUMP_PICKS). Used by certify.py.
  *
  * Every player has c[0] = number of picks taken, so the lex-min rule makes the
  * game proceed in rounds of k picks (each player once). Within a round only
@@ -138,6 +145,8 @@ int main(int argc, char **argv) {
     int64_t start_rounds = argc > 3 ? (int64_t)atof(argv[3]) : 1024;
     int64_t dump = argc > 4 ? (int64_t)atof(argv[4]) : 0;
     int64_t store = argc > 5 ? (int64_t)atof(argv[5]) : cap;
+    int64_t state_at = argc > 6 ? (int64_t)atof(argv[6]) : -1;
+    int64_t min_repeats = argc > 7 ? (int64_t)atof(argv[7]) : MIN_REPEATS;
     if (K < 2 || K > 255) { fprintf(stderr, "K out of range\n"); return 2; }
     if (store <= 0 || store > cap) store = cap;
 
@@ -163,6 +172,17 @@ int main(int argc, char **argv) {
     int64_t v_mu = -1, v_lam = -1, v_target = 0, v_idx = 0, v_end = 0, brk = -1;
 
     for (int64_t r = 0; r < cap_rounds; r++) {
+        if (e == state_at) {
+            FILE *f = fopen("state_dump.txt", "w");
+            for (int i = 0; i < K; i++) {
+                for (int j = 0; j < J; j++)
+                    fprintf(f, "%s%016llx%016llx%016llx%016llx", j ? " " : "",
+                            (unsigned long long)C[i][j].w[3], (unsigned long long)C[i][j].w[2],
+                            (unsigned long long)C[i][j].w[1], (unsigned long long)C[i][j].w[0]);
+                fprintf(f, "\n");
+            }
+            fclose(f);
+        }
         /* insertion sort of order[] by c[1..], ties to lowest index */
         for (int a = 1; a < K; a++) {
             int x = order[a], b = a - 1;
@@ -215,7 +235,7 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "CHECK k=%d picks=%lld found=%d mu=%lld lambda=%lld\n", K,
                         (long long)(M * K), found, found ? (long long)mu : -1LL, found ? (long long)lam : -1LL);
                 if (found) {
-                    int64_t a = MIN_TAIL_FACTOR * (mu + lam), b = MIN_REPEATS * lam;
+                    int64_t a = MIN_TAIL_FACTOR * (mu + lam), b = min_repeats * lam;
                     v_mu = mu; v_lam = lam; v_target = mu + (a > b ? a : b);
                     v_idx = (e - mu) % lam; v_end = e; verifying = 1; brk = -1; /* break= refers to this candidate */
                     if (e >= v_target) { settled = 1; break; }
@@ -229,8 +249,11 @@ int main(int argc, char **argv) {
     }
     if (dump) {
         FILE *f = fopen("picks_dump.bin", "wb");
-        int64_t n = dump < e ? dump : e;
-        fwrite(s, 1, n < N_store ? n : N_store, f);
+        int64_t from = state_at > 0 ? state_at : 0;
+        int64_t to = from + dump;
+        if (to > e) to = e;
+        if (to > N_store) to = N_store;
+        if (to > from) fwrite(s + from, 1, to - from, f);
         fclose(f);
     }
     int64_t reps = v_lam > 0 ? (v_end - v_mu) / v_lam : 0;

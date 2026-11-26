@@ -69,6 +69,17 @@ def main():
     print(f"k=2 C engine 1e6 picks: status={r['status']} first_tie={r['first_tie']}")
     ok &= r["status"] == "tie_J_too_small" and r["first_tie"] == "256"
 
+    # 5. drift certificate: false k=15 loop must predict the engine's break pick exactly,
+    #    the k=3 and real k=15 loops must be certified permanent.
+    import certify
+    r = certify.certify(15, 30591, 8100, verbose=False)
+    print(f"certify k=15 (30591, 8100): {r['verdict']}, break pick {r['break_pick']} (engine: 239670)")
+    ok &= r["break_pick"] == 239670
+    for k, mu, lam in ((3, 47, 54), (15, 330741, 48600)):
+        r = certify.certify(k, mu, lam, verbose=False)
+        print(f"certify k={k} ({mu}, {lam}): {r['verdict']}")
+        ok &= r["verdict"] == "permanent"
+
     print("VALIDATION", "PASSED" if ok else "FAILED")
     sys.exit(0 if ok else 1)
 
