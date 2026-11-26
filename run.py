@@ -63,15 +63,16 @@ def write_csv(rows, path):
 
 
 def draw(rows, path, kmin, kmax):
-    ok = [rows[k] for k in sorted(rows) if rows[k]["status"] == "settled"]
-    bad = [rows[k] for k in sorted(rows) if rows[k]["status"] != "settled"]
+    is_good = lambda r: r["status"] == "settled" or r["status"].startswith("certified permanent")
+    ok = [rows[k] for k in sorted(rows) if is_good(rows[k])]
+    bad = [rows[k] for k in sorted(rows) if not is_good(rows[k])]
     fig, ax = plt.subplots(figsize=(10, 5.5), dpi=150)
     ink, muted, grid = "#1f1f1f", "#6b6b6b", "#e6e6e6"
     blue, orange, gray = "#257de0", "#f47230", "#8a8a8a"
     if ok:
         # NaN at unsettled k so the lines break there instead of bridging the gap
         ks = sorted(rows)
-        good = lambda k: rows[k]["status"] == "settled"
+        good = lambda k: is_good(rows[k])
         lead = [max(int(rows[k]["lead_rounds"]), 0.5) if good(k) else float("nan") for k in ks]
         cyc = [float(Fraction(str(rows[k]["cycle_rounds"]))) if good(k) else float("nan") for k in ks]
         ax.plot(ks, lead, "-o", color=blue, lw=2, ms=6, mec="white", mew=1.5, label="lead-in (rounds)")

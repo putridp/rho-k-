@@ -41,6 +41,11 @@ the exact state at its start (dumped by `duel` with STATE_AT).
   gap is used up. All pairs permanent proves the loop never breaks.
 - Checked against every false loop seen so far (k=15, 16, 24, 48: breaks after 13 to
   618 repeats): the predicted break pick equals the engine's BREAK pick every time.
+- On all settled loops: 46 permanent. k=39 (1002830, 216216) had passed the 1000-repeat
+  rule but the certificate predicted a break after 19668 repeats at pick 4253557401,
+  which the engine confirmed exactly. Its next loop (4253556902, 216216) is certified
+  permanent (engine saw 31202 repeats); results.csv marks it "certified permanent"
+  because the 10 (mu + lambda) rule would need 4.7e10 picks, past 256-bit range.
 
     python3 certify.py 15 30591 8100     # false loop: breaks after about 25 repeats, pick 239670
     python3 certify.py --settled         # every settled k -> certificates.csv
