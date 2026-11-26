@@ -1,6 +1,9 @@
 """Compute rho(k) for Du(k,0), k = KMIN..KMAX, one k per process, smallest k first.
 
-Usage: python3 run.py [--cap 2e8] [--kmin 3] [--kmax 50] [--workers N]
+Usage: python3 run.py [--cap 2e10] [--store 2e9] [--kmin 3] [--kmax 50] [--workers N]
+--cap is the total pick budget per k, --store the stored prefix (about 1.1 bytes per
+pick per running k). Settled means the tail after mu held for at least
+max(10 (mu + lambda), 1000 lambda) picks, checked pick by pick (see duel.c).
 Writes results.csv and chart.png after every finished k.
 """
 import argparse
@@ -17,8 +20,8 @@ import matplotlib.pyplot as plt
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "duel")
-FIELDS = ["k", "mu", "lambda", "lead_rounds", "cycle_rounds", "picks_checked", "status",
-          "ties", "first_tie"]
+FIELDS = ["k", "mu", "lambda", "lead_rounds", "cycle_rounds", "picks_checked", "repeats_seen",
+          "status", "ties", "first_tie"]
 
 
 def fmt_cap(n):
@@ -28,18 +31,23 @@ def fmt_cap(n):
 
 
 def solve(args):
-    k, cap = args
-    out = subprocess.run([BIN, str(k), str(int(cap))], capture_output=True, text=True, check=True).stdout
+    k, cap, store = args
+    out = subprocess.run([BIN, str(k), str(int(cap)), "1024", "0", str(int(min(store, cap)))],
+                         capture_output=True, text=True, check=True).stdout
     r = dict(kv.split("=") for kv in out.split("RESULT", 1)[1].split())
     mu, lam, picks = int(r["mu"]), int(r["lambda"]), int(r["picks"])
-    row = {"k": k, "picks_checked": picks, "ties": r["ties"],
+    row = {"k": k, "picks_checked": picks, "repeats_seen": int(r["repeats"]), "ties": r["ties"],
            "first_tie": r["first_tie"] if r["first_tie"] != "-1" else ""}
     if r["status"] == "settled":
         cyc = Fraction(lam, k)
         row.update(mu=mu, **{"lambda": lam}, lead_rounds=math.ceil(mu / k),
                    cycle_rounds=str(cyc) if cyc.denominator > 1 else cyc.numerator, status="settled")
     else:
-        cand = f" (last candidate mu {r['cand_mu']} lambda {r['cand_lambda']})" if r["cand_mu"] != "-1" else ""
+        cand = ""
+        if r["cand_mu"] != "-1":
+            held = (f"broke at pick {r['break']}" if r["break"] != "-1" and int(r["break"]) >= int(r["cand_mu"])
+                    else f"held {r['repeats']} repeats")
+            cand = f" (last candidate mu {r['cand_mu']} lambda {r['cand_lambda']}, {held})"
         status = {"unsettled": f"not settled by {fmt_cap(cap)}{cand}",
                   "overflow": f"stopped at {picks} (256-bit guard)",
                   "tie_J_too_small": f"full tie at pick {r['first_tie']} (J too small)"}[r["status"]]
@@ -98,7 +106,8 @@ def draw(rows, path, kmin, kmax):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cap", type=float, default=2e8)
+    ap.add_argument("--cap", type=float, default=2e10)
+    ap.add_argument("--store", type=float, default=2e9)
     ap.add_argument("--kmin", type=int, default=3)
     ap.add_argument("--kmax", type=int, default=50)
     ap.add_argument("--workers", type=int, default=os.cpu_count())
@@ -112,8 +121,8 @@ def main():
     rows = {}
     if a.only and os.path.exists(csv_path):  # keep earlier rows, recompute only the listed k
         for r in csv.DictReader(open(csv_path)):
-            for f in ("k", "mu", "lambda", "lead_rounds", "picks_checked"):
-                r[f] = int(r[f]) if r[f] else ""
+            for f in ("k", "mu", "lambda", "lead_rounds", "picks_checked", "repeats_seen"):
+                r[f] = int(r[f]) if r.get(f) else ""
             rows[r["k"]] = r
     if a.chart_only:
         rows = {}
@@ -123,14 +132,14 @@ def main():
         draw(rows, png_path, a.kmin, a.kmax)
         return
     ks = [int(x) for x in a.only.split(",")] if a.only else range(a.kmin, a.kmax + 1)
-    jobs = [(k, a.cap) for k in sorted(ks)]
+    jobs = [(k, a.cap, a.store) for k in sorted(ks)]
     with Pool(a.workers) as pool:
         for row in pool.imap_unordered(solve, jobs):
             rows[row["k"]] = row
             write_csv(rows, csv_path)
             draw(rows, png_path, a.kmin, a.kmax)
             print(f"k={row['k']:>2} mu={row['mu']} lambda={row['lambda']} "
-                  f"rho=({row['lead_rounds']}, {row['cycle_rounds']}) {row['status']}", flush=True)
+                  f"rho=({row['lead_rounds']}, {row['cycle_rounds']}) repeats={row['repeats_seen']} {row['status']}", flush=True)
 
 
 if __name__ == "__main__":

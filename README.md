@@ -16,14 +16,20 @@ k players, vectors c of length J=8. The lexicographically smallest c picks next
 - Periodicity: KMP prefix function over the reversed sequence of rounds finds the
   longest periodic tail, then the exact pick-level lambda (smallest divisor of the
   round period that works) and mu (backward scan).
-- Accept only if the tail is at least 5 lambda long (first cycle plus 4 repeats) and
-  the same (mu, lambda) is found at two checkpoints where the second is at least
-  double the first.
+- A checkpoint proposes a candidate when the tail is at least 5 lambda long. The
+  candidate is then verified pick by pick against its first cycle. It is accepted
+  only when the tail after mu reaches max(10 (mu + lambda), 1000 lambda) picks
+  (`repeats_seen` in results.csv). A mismatch prints BREAK and analysis resumes at
+  the next checkpoint. Short-tail candidates do break: k=16 (486295, 22528) breaks
+  at pick 2188192 after 75 repeats and k=24 (607570, 25344) at pick 9091779 after
+  334, both confirmed against the pure-Python reference.
+- Verification reads only the first cycle, so it runs past the stored prefix
+  (`--store`, about 1.1 bytes per pick per running k) up to `--cap` with no extra memory.
 - Any full tie between two vectors (after round 0, where all start at zero) marks the
   k as `full tie ... (J too small)` and is never reported as settled.
 
 ## Run
     gcc -O3 -march=native -o duel duel.c
     python3 validate.py
-    python3 run.py --cap 2e8                 # all k
-    python3 run.py --only 42,50 --cap 1e9    # recompute some k, merge into results.csv
+    python3 run.py --cap 2e10 --store 2e9          # all k (k=42 needs about 1.5e10 picks)
+    python3 run.py --only 42,50 --cap 2e10         # recompute some k, merge into results.csv

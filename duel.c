@@ -1,7 +1,7 @@
 /*
  * Greedy duel sequence Du(k,0), J = 8, exact 256-bit signed integers.
  *
- * Usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS]
+ * Usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS]
  *
  * Every player has c[0] = number of picks taken, so the lex-min rule makes the
  * game proceed in rounds of k picks (each player once). Within a round only
@@ -10,9 +10,14 @@
  * (ties to lowest index). We sort once per round with insertion sort seeded by
  * the previous round's order.
  *
- * Periodicity is analysed at doubling checkpoints (in rounds). Output is a
- * single line "RESULT k=.. mu=.. lambda=.. picks=.. status=.. ties=.. first_tie=.."
- * plus "CHECK" lines per checkpoint on stderr.
+ * Periodicity is analysed at doubling checkpoints (in rounds). A candidate
+ * (mu, lambda) is then verified pick by pick against its first cycle; it is
+ * settled only when the tail after mu reaches max(10 (mu + lambda), 1000 lambda)
+ * picks. A mismatch prints BREAK and analysis resumes at the next checkpoint.
+ * Verification needs no extra memory, so it continues past STORE_PICKS (the
+ * stored prefix, about 1.1 bytes per pick) up to CAP_PICKS.
+ * Output is a single line "RESULT k=.. mu=.. lambda=.. picks=.. status=.. ...
+ * repeats=.. break=.." plus CHECK / VERIFY / BREAK lines on stderr.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -21,7 +26,9 @@
 
 #define J 8
 #define L 4 /* 4 x 64 = 256 bits */
-#define MIN_TAIL_CYCLES 5 /* tail >= first cycle + 4 repeats */
+#define MIN_TAIL_CYCLES 5 /* candidate detection: tail >= first cycle + 4 repeats */
+#define MIN_REPEATS 1000 /* settled: tail >= 1000 lambda ... */
+#define MIN_TAIL_FACTOR 10 /* ... and tail >= 10 (mu + lambda) */
 
 typedef struct { uint64_t w[L]; } i256;
 
@@ -111,17 +118,20 @@ static int analyse(const uint8_t *s, int64_t M, int64_t *mu_out, int64_t *lam_ou
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS]\n"); return 2; }
     K = atoi(argv[1]);
     int64_t cap = (int64_t)atof(argv[2]);
     int64_t start_rounds = argc > 3 ? (int64_t)atof(argv[3]) : 1024;
     int64_t dump = argc > 4 ? (int64_t)atof(argv[4]) : 0;
+    int64_t store = argc > 5 ? (int64_t)atof(argv[5]) : cap;
     if (K < 2 || K > 255) { fprintf(stderr, "K out of range\n"); return 2; }
+    if (store <= 0 || store > cap) store = cap;
 
     int64_t cap_rounds = cap / K;
-    int64_t N_cap = cap_rounds * K;
-    uint8_t *s = malloc(N_cap);
-    pi_buf = malloc(sizeof(int32_t) * (cap_rounds + 1));
+    int64_t store_rounds = store / K;
+    int64_t N_store = store_rounds * K;
+    uint8_t *s = malloc(N_store);
+    pi_buf = malloc(sizeof(int32_t) * (store_rounds + 1));
     C = calloc(K, sizeof(*C));
     int *order = malloc(sizeof(int) * K);
     if (!s || !pi_buf || !C || !order) { fprintf(stderr, "out of memory\n"); return 3; }
@@ -132,10 +142,11 @@ int main(int argc, char **argv) {
     B[0].w[0] = 1; /* C(0,0) */
 
     int64_t ties = 0, first_tie = -1, e = 0;
-    int64_t next_check = start_rounds < cap_rounds ? start_rounds : cap_rounds;
-    int have_prev = 0; int64_t prev_mu = 0, prev_lam = 0, prev_M = 0;
-    int settled = 0; int64_t res_mu = -1, res_lam = -1, last_mu = -1, last_lam = -1;
-    int overflow = 0;
+    int64_t next_check = start_rounds < store_rounds ? start_rounds : store_rounds;
+    int settled = 0, overflow = 0;
+    /* candidate under verification: every pick e must equal s[v_mu + (e - v_mu) % v_lam] */
+    int verifying = 0;
+    int64_t v_mu = -1, v_lam = -1, v_target = 0, v_idx = 0, v_end = 0, brk = -1;
 
     for (int64_t r = 0; r < cap_rounds; r++) {
         /* insertion sort of order[] by c[1..], ties to lowest index */
@@ -156,37 +167,60 @@ int main(int argc, char **argv) {
                 }
         for (int pos = 0; pos < K; pos++, e++) {
             int p = order[pos];
-            s[e] = (uint8_t)p;
+            if (e < N_store) s[e] = (uint8_t)p;
+            if (verifying) {
+                if ((uint8_t)p != s[v_mu + v_idx]) {
+                    verifying = 0; brk = e; v_end = e;
+                    fprintf(stderr, "BREAK k=%d mu=%lld lambda=%lld at pick %lld after %lld repeats\n", K,
+                            (long long)v_mu, (long long)v_lam, (long long)e, (long long)((e - v_mu) / v_lam));
+                    fflush(stderr);
+                } else if (++v_idx == v_lam) v_idx = 0;
+            }
             for (int j = 0; j < J; j++) {
                 if (j & 1) sub256(&C[p][j], &B[j]); else add256(&C[p][j], &B[j]);
             }
             for (int j = J - 1; j >= 1; j--) add256(&B[j], &B[j - 1]);
         }
         if (near_overflow(&B[J - 1])) { overflow = 1; cap_rounds = r + 1; }
+        if (verifying) v_end = e;
+        if (verifying && e >= v_target) { settled = 1; break; }
 
-        if (r + 1 == next_check || r + 1 == cap_rounds) {
-            int64_t M = r + 1, mu, lam;
-            int found = analyse(s, M, &mu, &lam);
-            fprintf(stderr, "CHECK k=%d picks=%lld found=%d mu=%lld lambda=%lld\n", K,
-                    (long long)(M * K), found, found ? (long long)mu : -1LL, found ? (long long)lam : -1LL);
-            fflush(stderr);
-            if (found) { last_mu = mu; last_lam = lam; } else { last_mu = last_lam = -1; }
-            /* confirmation must come from a true doubling, not a short final step at the cap */
-            if (found && have_prev && mu == prev_mu && lam == prev_lam && M >= 2 * prev_M) {
-                settled = 1; res_mu = mu; res_lam = lam; break;
+        int at_check = (r + 1 == next_check) || (r + 1 == store_rounds);
+        if (at_check && r + 1 <= store_rounds) {
+            int64_t M = r + 1;
+            if (verifying) {
+                fprintf(stderr, "VERIFY k=%d picks=%lld mu=%lld lambda=%lld repeats=%lld target=%lld\n", K,
+                        (long long)e, (long long)v_mu, (long long)v_lam,
+                        (long long)((e - v_mu) / v_lam), (long long)v_target);
+            } else {
+                int64_t mu, lam;
+                int found = analyse(s, M, &mu, &lam);
+                fprintf(stderr, "CHECK k=%d picks=%lld found=%d mu=%lld lambda=%lld\n", K,
+                        (long long)(M * K), found, found ? (long long)mu : -1LL, found ? (long long)lam : -1LL);
+                if (found) {
+                    int64_t a = MIN_TAIL_FACTOR * (mu + lam), b = MIN_REPEATS * lam;
+                    v_mu = mu; v_lam = lam; v_target = mu + (a > b ? a : b);
+                    v_idx = (e - mu) % lam; v_end = e; verifying = 1;
+                    if (e >= v_target) { settled = 1; break; }
+                }
             }
-            have_prev = found; prev_mu = mu; prev_lam = lam; prev_M = M;
-            next_check = 2 * M < cap_rounds ? 2 * M : cap_rounds;
+            fflush(stderr);
+            next_check = 2 * M < store_rounds ? 2 * M : store_rounds;
         }
+        /* past storage, only a live candidate can make progress */
+        if (r + 1 >= store_rounds && !verifying) break;
     }
     if (dump) {
         FILE *f = fopen("picks_dump.bin", "wb");
-        fwrite(s, 1, dump < e ? dump : e, f);
+        int64_t n = dump < e ? dump : e;
+        fwrite(s, 1, n < N_store ? n : N_store, f);
         fclose(f);
     }
-    printf("RESULT k=%d mu=%lld lambda=%lld picks=%lld status=%s ties=%lld first_tie=%lld cand_mu=%lld cand_lambda=%lld\n",
-           K, (long long)res_mu, (long long)res_lam, (long long)e,
+    int64_t reps = v_lam > 0 ? (v_end - v_mu) / v_lam : 0;
+    printf("RESULT k=%d mu=%lld lambda=%lld picks=%lld status=%s ties=%lld first_tie=%lld cand_mu=%lld cand_lambda=%lld repeats=%lld break=%lld\n",
+           K, settled ? (long long)v_mu : -1LL, settled ? (long long)v_lam : -1LL, (long long)e,
            ties ? "tie_J_too_small" : (settled ? "settled" : (overflow ? "overflow" : "unsettled")),
-           (long long)ties, (long long)first_tie, (long long)last_mu, (long long)last_lam);
+           (long long)ties, (long long)first_tie, (long long)v_mu, (long long)v_lam,
+           (long long)reps, (long long)brk);
     return 0;
 }
