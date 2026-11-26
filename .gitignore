@@ -1,0 +1,4 @@
+duel
+picks_dump.bin
+*.log
+__pycache__/
