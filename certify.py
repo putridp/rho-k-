@@ -4,6 +4,11 @@ Usage:
     python3 certify.py K MU LAMBDA          # one loop
     python3 certify.py --settled            # every settled k in results.csv -> certificates.csv
 
+run.py uses this as the settle rule: a candidate is settled only when certified
+permanent. When a candidate is predicted to break, certify() also returns the exact
+state at the start of the break round (from the closed form below), so the engine can
+jump there instead of simulating the whole false loop.
+
 Output: "permanent" (a proof that the loop repeats forever) or "breaks after about N
 repeats" with the exact predicted break pick.
 
@@ -47,19 +52,57 @@ J = 8
 SIGN = [(-1) ** j for j in range(J)]
 
 
-def dump_loop(k, T, Lam):
+def from_hex(h):
+    bits = 4 * len(h)
+    v = int(h, 16)
+    return v - (1 << bits) if v >> (bits - 1) else v
+
+
+def to_hex(v, L):
+    bits = 64 * L
+    assert -(1 << (bits - 3)) <= v < (1 << (bits - 3)), "value too large for engine width"
+    return format(v % (1 << bits), f"0{16 * L}x")
+
+
+def write_resume(path, X, P, c, prefix, L):
+    """Engine resume files: state c at pick X and the P picks before X."""
+    with open(path + ".txt", "w") as f:
+        f.write(f"{X} {P}\n")
+        for row in c:
+            f.write(" ".join(to_hex(v, L) for v in row) + "\n")
+        f.write(" ".join(to_hex(math.comb(X, m), L) for m in range(J)) + "\n")
+    with open(path + ".bin", "wb") as f:
+        f.write(bytes(prefix))
+
+
+def engine_for(k, end):
+    """(binary, L) wide enough for picks up to `end`: c[7] grows like e^8 / (8! k)."""
+    bits = 8 * math.log2(max(end, 2)) - math.log2(40320 * k)
+    if bits < 248:
+        return BIN, 4
+    if bits < 312:
+        return BIN + "320", 5
+    raise RuntimeError(f"k={k}: picks up to {end} need more than 320 bits")
+
+
+def resume_args(k, resume, end, td):
+    """Engine binary and argument for a jump-ahead state resume = (X, P, c, prefix)."""
+    binary, L = engine_for(k, end)
+    if not resume:
+        return binary, []
+    path = os.path.join(td, "resume")
+    write_resume(path, *resume, L)
+    return binary, [path]
+
+
+def dump_loop(k, T, Lam, resume=None):
     """Run the C engine to pick T + Lam; return (state c at T, picks [T, T + Lam))."""
     cap = T + Lam
     with tempfile.TemporaryDirectory() as td:
-        subprocess.run([BIN, str(k), str(cap), str(cap), str(Lam), str(cap), str(T)],
-                       capture_output=True, text=True, check=True, cwd=td)
-        state = []
-        for line in open(os.path.join(td, "state_dump.txt")):
-            row = []
-            for h in line.split():
-                v = int(h, 16)
-                row.append(v - (1 << 256) if v >> 255 else v)
-            state.append(row)
+        binary, extra = resume_args(k, resume, cap, td)
+        args = [binary, str(k), str(cap), str(cap), str(Lam), str(cap), str(T), "1000"] + extra
+        subprocess.run(args, capture_output=True, text=True, check=True, cwd=td)
+        state = [[from_hex(h) for h in line.split()] for line in open(os.path.join(td, "state_dump.txt"))]
         picks = open(os.path.join(td, "picks_dump.bin"), "rb").read()
     assert len(state) == k and len(picks) == Lam, (len(state), len(picks))
     return state, picks
@@ -121,11 +164,14 @@ def check_pair(cp, cq, Fp, Fq, p, q, Acoef):
     return (r0 + 1 if less(v[0], p, v[1], q) else r0), js, m, d
 
 
-def certify(k, mu, lam, verbose=True):
+def certify(k, mu, lam, verbose=True, resume=None):
+    """resume: jump-ahead state (X, P, c, prefix) the candidate was found from, or None."""
     t0 = time.time()
     Lam = lam * k // math.gcd(lam, k)
-    T = -(-mu // k) * k
-    c, w = dump_loop(k, T, Lam)
+    T = max(-(-mu // k) * k, resume[0] if resume else 0)
+    c, w = dump_loop(k, T, Lam, resume)
+    if any(w[i] != w[i + lam] for i in range(Lam - lam)):
+        raise RuntimeError(f"picks from {T} are not {lam}-periodic: not a loop yet")
     Acoef = [A_coeffs(i, Lam) for i in range(J)]
 
     # F for the loop read from T
@@ -193,9 +239,13 @@ def certify(k, mu, lam, verbose=True):
         v = state_at_repeat(cx, Fx, best_R, Acoef)
         order = sorted(range(k), key=lambda p: (v[p], p))
         pos = next(a for a in range(k) if order[a] != rnd[a])
-        bp = x + best_R * Lam + pos
+        X = x + best_R * Lam
+        bp = X + pos
+        # jump-ahead: exact state at the start of the break round, plus the picks before it
+        P = min(X - T, max(4 * Lam, 1 << 20)) // k * k
+        prefix = [w[(i - T) % Lam] for i in range(X - P, X)]
         res.update(verdict=f"breaks after about {(bp - mu) // lam} repeats", break_pick=bp,
-                   repeats=(bp - mu) // lam, binding=binding)
+                   repeats=(bp - mu) // lam, binding=binding, jump=(X, P, v, prefix))
     if verbose:
         report(res)
     return res

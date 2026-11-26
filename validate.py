@@ -80,6 +80,40 @@ def main():
         print(f"certify k={k} ({mu}, {lam}): {r['verdict']}")
         ok &= r["verdict"] == "permanent"
 
+    # 6. k=39's (1002830, 216216) held 1000 repeats but is false: the certificate must
+    #    predict the engine's break at pick 4253557401 (after 19668 repeats).
+    r = certify.certify(39, 1002830, 216216, verbose=False)
+    print(f"certify k=39 (1002830, 216216): {r['verdict']}, break pick {r['break_pick']} (engine: 4253557401)")
+    ok &= r["break_pick"] == 4253557401
+
+    # 7. jump-ahead: the closed-form state at the k=16 break round must equal direct
+    #    simulation, and resuming the engine there (256- and 320-bit) must reproduce
+    #    the directly simulated picks.
+    r = certify.certify(16, 486295, 22528, verbose=False)
+    X, P, v, prefix = r["jump"]
+    n = 10 ** 6
+    with tempfile.TemporaryDirectory() as td:
+        subprocess.run([BIN, "16", str(X + n), "1e12", str(n), str(X + n), str(X)], check=True,
+                       capture_output=True, cwd=td)
+        ref_state = [[certify.from_hex(h) for h in l.split()] for l in open(os.path.join(td, "state_dump.txt"))]
+        ref = open(os.path.join(td, "picks_dump.bin"), "rb").read()
+    ok &= v == ref_state
+    print(f"jump-ahead k=16 to pick {X}: closed-form state == simulated: {v == ref_state}")
+    for binary, L in ((BIN, 4), (BIN + "320", 5)):
+        with tempfile.TemporaryDirectory() as td:
+            certify.write_resume(os.path.join(td, "resume"), X, P, v, prefix, L)
+            subprocess.run([binary, "16", str(X + n), "1e12", str(n), str(X + n), str(X), "1000",
+                            os.path.join(td, "resume")], check=True, capture_output=True, cwd=td)
+            got = open(os.path.join(td, "picks_dump.bin"), "rb").read()
+        print(f"  resumed {os.path.basename(binary)}: {len(got)} picks identical to direct run: {got == ref}")
+        ok &= got == ref
+
+    # 8. full driver on k=39: false loop certified as breaking, jump, real loop certified.
+    import run
+    row = run.solve((39, 1e12, 2e9))
+    print(f"run.solve k=39: ({row['mu']}, {row['lambda']}) {row['status']}; false loops: {row['false_loops']}")
+    ok &= (row["mu"], row["lambda"], row["status"]) == (4253556902, 216216, "settled")
+
     print("VALIDATION", "PASSED" if ok else "FAILED")
     sys.exit(0 if ok else 1)
 

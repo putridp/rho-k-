@@ -1,10 +1,20 @@
 /*
- * Greedy duel sequence Du(k,0), J = 8, exact 256-bit signed integers.
+ * Greedy duel sequence Du(k,0), J = 8, exact signed integers of 64*L bits
+ * (L = 4 by default; build with -DL=5 for 320 bits, see run.py's duel320).
  *
- * Usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS] [STATE_AT] [MIN_REPEATS]
+ * Usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS] [STATE_AT]
+ *             [MIN_REPEATS] [RESUME]
  *
- * MIN_REPEATS (default 1000) raises the repeat floor of the settle rule; a large value
- * keeps verifying a candidate up to CAP_PICKS (used to check certify.py predictions).
+ * CAP_PICKS is the absolute pick to stop at. STORE_PICKS is how many picks are kept
+ * for analysis (about 1.1 bytes each), counted from the storage start.
+ *
+ * MIN_REPEATS (default 1000) is the repeat floor of the built-in settle rule; a large
+ * value keeps verifying a candidate up to CAP_PICKS. 0 stops at the first candidate
+ * (status=candidate): run.py then settles it with certify.py.
+ *
+ * RESUME: jump-ahead start. RESUME.txt holds "X P", then K lines of c[0..7] and one
+ * line of C(X, 0..7), all hex two's complement with 16*L digits; RESUME.bin holds the
+ * P picks before X. Play starts at pick X; storage (and mu) starts at X - P.
  *
  * STATE_AT (a multiple of K): write every player's c[0..7] at that pick to
  * state_dump.txt (hex, two's complement), and make picks_dump.bin hold picks
@@ -32,7 +42,9 @@
 #include <string.h>
 
 #define J 8
+#ifndef L
 #define L 4 /* 4 x 64 = 256 bits */
+#endif
 #define MIN_TAIL_CYCLES 5 /* candidate detection: tail >= first cycle + 4 repeats */
 #define MIN_REPEATS 1000 /* settled: tail >= 1000 lambda ... */
 #define MIN_TAIL_FACTOR 10 /* ... and tail >= 10 (mu + lambda) */
@@ -138,8 +150,22 @@ static int analyse(const uint8_t *s, int64_t M, int64_t *mu_out, int64_t *lam_ou
     return 1;
 }
 
+static void print_hex(FILE *f, const i256 *a) {
+    for (int i = L - 1; i >= 0; i--) fprintf(f, "%016llx", (unsigned long long)a->w[i]);
+}
+static int read_hex(FILE *f, i256 *a) {
+    char buf[16 * L + 1];
+    if (fscanf(f, "%s", buf) != 1 || strlen(buf) != 16 * L) return 0;
+    for (int i = 0; i < L; i++) {
+        char part[17];
+        memcpy(part, buf + 16 * (L - 1 - i), 16); part[16] = 0;
+        a->w[i] = strtoull(part, NULL, 16);
+    }
+    return 1;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: duel K CAP_PICKS [START_ROUNDS] [DUMP_PICKS] [STORE_PICKS] [STATE_AT] [MIN_REPEATS] [RESUME]\n"); return 2; }
     K = atoi(argv[1]);
     int64_t cap = (int64_t)atof(argv[2]);
     int64_t start_rounds = argc > 3 ? (int64_t)atof(argv[3]) : 1024;
@@ -147,38 +173,62 @@ int main(int argc, char **argv) {
     int64_t store = argc > 5 ? (int64_t)atof(argv[5]) : cap;
     int64_t state_at = argc > 6 ? (int64_t)atof(argv[6]) : -1;
     int64_t min_repeats = argc > 7 ? (int64_t)atof(argv[7]) : MIN_REPEATS;
+    const char *resume = argc > 8 ? argv[8] : NULL;
     if (K < 2 || K > 255) { fprintf(stderr, "K out of range\n"); return 2; }
-    if (store <= 0 || store > cap) store = cap;
 
-    int64_t cap_rounds = cap / K;
-    int64_t store_rounds = store / K;
-    int64_t N_store = store_rounds * K;
-    uint8_t *s = malloc(N_store);
-    pi_buf = malloc(sizeof(int32_t) * (store_rounds + 1));
     C = calloc(K, sizeof(*C));
     int *order = malloc(sizeof(int) * K);
-    if (!s || !pi_buf || !C || !order) { fprintf(stderr, "out of memory\n"); return 3; }
-    for (int i = 0; i < K; i++) order[i] = i;
-
     i256 B[J];
     memset(B, 0, sizeof B);
     B[0].w[0] = 1; /* C(0,0) */
+    int64_t X = 0, P = 0;
+    FILE *rf = NULL;
+    if (resume) {
+        char path[4096];
+        snprintf(path, sizeof path, "%s.txt", resume);
+        rf = fopen(path, "r");
+        long long x_, p_;
+        if (!rf || fscanf(rf, "%lld %lld", &x_, &p_) != 2) { fprintf(stderr, "bad resume file\n"); return 2; }
+        X = x_; P = p_;
+        if (X % K || P % K || P > X) { fprintf(stderr, "resume X, P must be multiples of K, P <= X\n"); return 2; }
+        for (int i = 0; i < K; i++)
+            for (int j = 0; j < J; j++)
+                if (!read_hex(rf, &C[i][j])) { fprintf(stderr, "bad resume state\n"); return 2; }
+        for (int j = 0; j < J; j++)
+            if (!read_hex(rf, &B[j])) { fprintf(stderr, "bad resume binomials\n"); return 2; }
+        fclose(rf);
+    }
+    const int64_t sb = X - P; /* absolute pick of storage index 0 */
+    if (store <= 0 || store > cap - sb) store = cap - sb;
+    if (store < P) store = P;
+    int64_t store_rounds = store / K;
+    int64_t N_store = store_rounds * K;
+    uint8_t *s = malloc(N_store > 0 ? N_store : 1);
+    pi_buf = malloc(sizeof(int32_t) * (store_rounds + 1));
+    if (!s || !pi_buf || !C || !order) { fprintf(stderr, "out of memory\n"); return 3; }
+    if (P) {
+        char path[4096];
+        snprintf(path, sizeof path, "%s.bin", resume);
+        FILE *pf = fopen(path, "rb");
+        if (!pf || (int64_t)fread(s, 1, P, pf) != P) { fprintf(stderr, "bad resume prefix\n"); return 2; }
+        fclose(pf);
+    }
+    for (int i = 0; i < K; i++) order[i] = i;
 
-    int64_t ties = 0, first_tie = -1, e = 0;
-    int64_t next_check = start_rounds < store_rounds ? start_rounds : store_rounds;
+    int64_t ties = 0, first_tie = -1, e = X;
+    int64_t next_check = start_rounds;
+    while (next_check <= P / K) next_check *= 2;
+    if (next_check > store_rounds) next_check = store_rounds;
     int settled = 0, overflow = 0;
-    /* candidate under verification: every pick e must equal s[v_mu + (e - v_mu) % v_lam] */
+    /* candidate under verification: every pick e must equal s[v_mu - sb + (e - v_mu) % v_lam] */
     int verifying = 0;
     int64_t v_mu = -1, v_lam = -1, v_target = 0, v_idx = 0, v_end = 0, brk = -1;
 
-    for (int64_t r = 0; r < cap_rounds; r++) {
+    while (e + K <= cap) {
         if (e == state_at) {
             FILE *f = fopen("state_dump.txt", "w");
             for (int i = 0; i < K; i++) {
-                for (int j = 0; j < J; j++)
-                    fprintf(f, "%s%016llx%016llx%016llx%016llx", j ? " " : "",
-                            (unsigned long long)C[i][j].w[3], (unsigned long long)C[i][j].w[2],
-                            (unsigned long long)C[i][j].w[1], (unsigned long long)C[i][j].w[0]);
+                for (int j = 0; j < J; j++) { if (j) fputc(' ', f); print_hex(f, &C[i][j]); }
                 fprintf(f, "\n");
             }
             fclose(f);
@@ -193,7 +243,7 @@ int main(int argc, char **argv) {
             }
             order[b + 1] = x;
         }
-        if (r > 0)
+        if (e > 0)
             for (int a = 1; a < K; a++)
                 if (cmp_player(order[a - 1], order[a]) == 0) {
                     ties++;
@@ -201,9 +251,9 @@ int main(int argc, char **argv) {
                 }
         for (int pos = 0; pos < K; pos++, e++) {
             int p = order[pos];
-            if (e < N_store) s[e] = (uint8_t)p;
+            if (e - sb < N_store) s[e - sb] = (uint8_t)p;
             if (verifying) {
-                if ((uint8_t)p != s[v_mu + v_idx]) {
+                if ((uint8_t)p != s[v_mu - sb + v_idx]) {
                     verifying = 0; brk = e; v_end = e;
                     fprintf(stderr, "BREAK k=%d mu=%lld lambda=%lld at pick %lld after %lld repeats\n", K,
                             (long long)v_mu, (long long)v_lam, (long long)e, (long long)((e - v_mu) / v_lam));
@@ -217,14 +267,12 @@ int main(int argc, char **argv) {
             for (int j = J - 1; j >= 1; j--) add256(&B[j], &B[j - 1]);
         }
         if (near_overflow(&B[J - 1])) overflow = 1;
-        if (overflow) { cap_rounds = r + 1; settled = 0; }
+        if (overflow) { settled = 0; break; }
         if (verifying) v_end = e;
-        if (verifying && e >= v_target && !overflow) { settled = 1; break; }
-        if (overflow) break;
+        if (verifying && e >= v_target) { settled = 1; break; }
 
-        int at_check = (r + 1 == next_check) || (r + 1 == store_rounds);
-        if (at_check && r + 1 <= store_rounds) {
-            int64_t M = r + 1;
+        int64_t M = (e - sb) / K; /* stored rounds so far */
+        if ((M == next_check || M == store_rounds) && M <= store_rounds) {
             if (verifying) {
                 fprintf(stderr, "VERIFY k=%d picks=%lld mu=%lld lambda=%lld repeats=%lld target=%lld\n", K,
                         (long long)e, (long long)v_mu, (long long)v_lam,
@@ -232,11 +280,12 @@ int main(int argc, char **argv) {
             } else {
                 int64_t mu, lam;
                 int found = analyse(s, M, &mu, &lam);
+                if (found) mu += sb;
                 fprintf(stderr, "CHECK k=%d picks=%lld found=%d mu=%lld lambda=%lld\n", K,
-                        (long long)(M * K), found, found ? (long long)mu : -1LL, found ? (long long)lam : -1LL);
+                        (long long)e, found, found ? (long long)mu : -1LL, found ? (long long)lam : -1LL);
                 if (found) {
                     int64_t a = MIN_TAIL_FACTOR * (mu + lam), b = min_repeats * lam;
-                    v_mu = mu; v_lam = lam; v_target = mu + (a > b ? a : b);
+                    v_mu = mu; v_lam = lam; v_target = min_repeats ? mu + (a > b ? a : b) : e;
                     v_idx = (e - mu) % lam; v_end = e; verifying = 1; brk = -1; /* break= refers to this candidate */
                     if (e >= v_target) { settled = 1; break; }
                 }
@@ -245,25 +294,27 @@ int main(int argc, char **argv) {
             next_check = 2 * M < store_rounds ? 2 * M : store_rounds;
         }
         /* past storage, only a live candidate can make progress */
-        if (r + 1 >= store_rounds && !verifying) break;
+        if (M >= store_rounds && !verifying) break;
     }
     if (dump) {
         FILE *f = fopen("picks_dump.bin", "wb");
-        int64_t from = state_at > 0 ? state_at : 0;
+        int64_t from = state_at > 0 ? state_at : sb;
         int64_t to = from + dump;
         if (to > e) to = e;
-        if (to > N_store) to = N_store;
-        if (to > from) fwrite(s + from, 1, to - from, f);
+        if (to > sb + N_store) to = sb + N_store;
+        if (from >= sb && to > from) fwrite(s + (from - sb), 1, to - from, f);
         fclose(f);
     }
     int64_t reps = v_lam > 0 ? (v_end - v_mu) / v_lam : 0;
     int maxbits = 0;
     for (int i = 0; i < K; i++)
         for (int j = 0; j < J; j++) { int b = bits256(&C[i][j]); if (b > maxbits) maxbits = b; }
-    printf("RESULT k=%d mu=%lld lambda=%lld picks=%lld status=%s ties=%lld first_tie=%lld cand_mu=%lld cand_lambda=%lld repeats=%lld break=%lld bits=%d\n",
-           K, settled ? (long long)v_mu : -1LL, settled ? (long long)v_lam : -1LL, (long long)e,
-           ties ? "tie_J_too_small" : (settled ? "settled" : (overflow ? "overflow" : "unsettled")),
+    const char *status = ties ? "tie_J_too_small"
+                       : settled ? (min_repeats ? "settled" : "candidate")
+                       : overflow ? "overflow" : "unsettled";
+    printf("RESULT k=%d mu=%lld lambda=%lld picks=%lld status=%s ties=%lld first_tie=%lld cand_mu=%lld cand_lambda=%lld repeats=%lld break=%lld bits=%d width=%d\n",
+           K, settled ? (long long)v_mu : -1LL, settled ? (long long)v_lam : -1LL, (long long)e, status,
            (long long)ties, (long long)first_tie, (long long)v_mu, (long long)v_lam,
-           (long long)reps, (long long)brk, maxbits);
+           (long long)reps, (long long)brk, maxbits, 64 * L);
     return 0;
 }
