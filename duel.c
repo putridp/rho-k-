@@ -61,6 +61,20 @@ static inline int near_overflow(const i256 *a) {
     uint64_t top = a->w[L - 1] >> 48;
     return !(top == 0 || top == 0xFFFF);
 }
+/* accumulator guard: |a| < 2^253 (top 3 bits equal). c[J-1] of a player grows like
+ * e^8 / (8! k), far faster than C(e, J-1), so it is the one that can wrap. */
+static inline int acc_near_overflow(const i256 *a) {
+    uint64_t top = a->w[L - 1] >> 61;
+    return !(top == 0 || top == 7);
+}
+/* bit length of |a| */
+static int bits256(const i256 *a) {
+    i256 x = *a;
+    if ((int64_t)x.w[L - 1] < 0) { i256 z; memset(&z, 0, sizeof z); sub256(&z, &x); x = z; }
+    for (int i = L - 1; i >= 0; i--)
+        if (x.w[i]) return 64 * i + 64 - __builtin_clzll(x.w[i]);
+    return 0;
+}
 
 static int K;
 static i256 (*C)[J];
@@ -179,11 +193,14 @@ int main(int argc, char **argv) {
             for (int j = 0; j < J; j++) {
                 if (j & 1) sub256(&C[p][j], &B[j]); else add256(&C[p][j], &B[j]);
             }
+            if (acc_near_overflow(&C[p][J - 1])) overflow = 1;
             for (int j = J - 1; j >= 1; j--) add256(&B[j], &B[j - 1]);
         }
-        if (near_overflow(&B[J - 1])) { overflow = 1; cap_rounds = r + 1; }
+        if (near_overflow(&B[J - 1])) overflow = 1;
+        if (overflow) { cap_rounds = r + 1; settled = 0; }
         if (verifying) v_end = e;
-        if (verifying && e >= v_target) { settled = 1; break; }
+        if (verifying && e >= v_target && !overflow) { settled = 1; break; }
+        if (overflow) break;
 
         int at_check = (r + 1 == next_check) || (r + 1 == store_rounds);
         if (at_check && r + 1 <= store_rounds) {
@@ -200,7 +217,7 @@ int main(int argc, char **argv) {
                 if (found) {
                     int64_t a = MIN_TAIL_FACTOR * (mu + lam), b = MIN_REPEATS * lam;
                     v_mu = mu; v_lam = lam; v_target = mu + (a > b ? a : b);
-                    v_idx = (e - mu) % lam; v_end = e; verifying = 1;
+                    v_idx = (e - mu) % lam; v_end = e; verifying = 1; brk = -1; /* break= refers to this candidate */
                     if (e >= v_target) { settled = 1; break; }
                 }
             }
@@ -217,10 +234,13 @@ int main(int argc, char **argv) {
         fclose(f);
     }
     int64_t reps = v_lam > 0 ? (v_end - v_mu) / v_lam : 0;
-    printf("RESULT k=%d mu=%lld lambda=%lld picks=%lld status=%s ties=%lld first_tie=%lld cand_mu=%lld cand_lambda=%lld repeats=%lld break=%lld\n",
+    int maxbits = 0;
+    for (int i = 0; i < K; i++)
+        for (int j = 0; j < J; j++) { int b = bits256(&C[i][j]); if (b > maxbits) maxbits = b; }
+    printf("RESULT k=%d mu=%lld lambda=%lld picks=%lld status=%s ties=%lld first_tie=%lld cand_mu=%lld cand_lambda=%lld repeats=%lld break=%lld bits=%d\n",
            K, settled ? (long long)v_mu : -1LL, settled ? (long long)v_lam : -1LL, (long long)e,
            ties ? "tie_J_too_small" : (settled ? "settled" : (overflow ? "overflow" : "unsettled")),
            (long long)ties, (long long)first_tie, (long long)v_mu, (long long)v_lam,
-           (long long)reps, (long long)brk);
+           (long long)reps, (long long)brk, maxbits);
     return 0;
 }

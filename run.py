@@ -45,11 +45,10 @@ def solve(args):
     else:
         cand = ""
         if r["cand_mu"] != "-1":
-            held = (f"broke at pick {r['break']}" if r["break"] != "-1" and int(r["break"]) >= int(r["cand_mu"])
-                    else f"held {r['repeats']} repeats")
+            held = f"broke at pick {r['break']}" if r["break"] != "-1" else f"held {r['repeats']} repeats"
             cand = f" (last candidate mu {r['cand_mu']} lambda {r['cand_lambda']}, {held})"
         status = {"unsettled": f"not settled by {fmt_cap(cap)}{cand}",
-                  "overflow": f"stopped at {picks} (256-bit guard)",
+                  "overflow": f"stopped at {picks} (256-bit guard){cand}",
                   "tie_J_too_small": f"full tie at pick {r['first_tie']} (J too small)"}[r["status"]]
         row.update(mu="", **{"lambda": ""}, lead_rounds="", cycle_rounds="", status=status)
     return row

@@ -8,14 +8,17 @@ from reference import du_sequence, naive_mu_lambda, thue_morse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(HERE, "duel")
-KNOWN = {3: (47, 54), 4: (46, 192), 9: (14468, 4860), 10: (5374, 1600), 24: (607570, 25344)}
+# k=24 was (607570, 25344) under the old 2-checkpoint rule; that cycle breaks at pick
+# 9091779 after 334 repeats (confirmed with reference.py). Value below holds 1000 repeats.
+KNOWN = {3: (47, 54), 4: (46, 192), 9: (14468, 4860), 10: (5374, 1600), 24: (50652467, 532224)}
 
 
-def run_c(k, cap, start=1024, dump=0, cwd=None):
-    out = subprocess.run([BIN, str(k), str(cap), str(start), str(dump)],
-                         capture_output=True, text=True, check=True, cwd=cwd).stdout
-    line = [l for l in out.splitlines() if l.startswith("RESULT")][0]
-    return dict(kv.split("=") for kv in line.split()[1:])
+def run_c(k, cap, start=1024, dump=0, cwd=None, want_err=False):
+    p = subprocess.run([BIN, str(k), str(cap), str(start), str(dump)],
+                       capture_output=True, text=True, check=True, cwd=cwd)
+    line = [l for l in p.stdout.splitlines() if l.startswith("RESULT")][0]
+    r = dict(kv.split("=") for kv in line.split()[1:])
+    return (r, p.stderr) if want_err else r
 
 
 def main():
@@ -43,10 +46,19 @@ def main():
 
     # 3. known (mu, lambda); also naive cross-check of the analyser for small k
     for k, (mu, lam) in KNOWN.items():
-        r = run_c(k, 2e8)
+        r = run_c(k, 1e9)
         got = (int(r["mu"]), int(r["lambda"]))
-        print(f"k={k}: got {got} expected {(mu, lam)} status={r['status']} picks={r['picks']} ties={r['ties']}")
-        ok &= got == (mu, lam)
+        print(f"k={k}: got {got} expected {(mu, lam)} status={r['status']} picks={r['picks']} "
+              f"repeats={r['repeats']} ties={r['ties']}")
+        ok &= got == (mu, lam) and r["status"] == "settled" and int(r["repeats"]) >= 1000
+
+    # 3b. k=16 has a false cycle (486295, 22528) that breaks at pick 2188192 after 75
+    #     repeats. The engine must catch the break and not report it.
+    r, err = run_c(16, 2e8, want_err=True)
+    got = (int(r["mu"]), int(r["lambda"]))
+    caught = "BREAK k=16 mu=486295 lambda=22528 at pick 2188192 after 75 repeats" in err
+    print(f"k=16: got {got} status={r['status']} repeats={r['repeats']} false cycle caught={caught}")
+    ok &= got != (486295, 22528) and r["status"] == "settled" and caught
     for k in (3, 4):
         picks, _ = du_sequence(k, 3000)
         print(f"naive analyser k={k}: {naive_mu_lambda(picks)}")
